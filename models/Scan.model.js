@@ -65,6 +65,25 @@ const scanSchema = new mongoose.Schema({
         type: String,
         default: ''
     },
+    // Who was logged in when this scan happened. Always derived server-side
+    // from the authenticated JWT (see scan.controller.js) — never trusted
+    // from the request body, so the frontend can't impersonate another user.
+    userId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        index: true
+    },
+    userName: {
+        type: String,
+        trim: true,
+        default: ''
+    },
+    userEmail: {
+        type: String,
+        trim: true,
+        lowercase: true,
+        default: ''
+    },
     // Scans are always saved to MongoDB immediately, but only pushed to
     // Google Sheets when the user explicitly taps "Save" on the result.
     syncedToSheet: {
@@ -73,6 +92,19 @@ const scanSchema = new mongoose.Schema({
     },
     syncedAt: {
         type: Date
+    },
+    // Same "Save" action also pushes this scan into Perfex CRM as a Lead.
+    syncedToCrm: {
+        type: Boolean,
+        default: false
+    },
+    crmLeadId: {
+        type: String,
+        default: ''
+    },
+    crmSyncError: {
+        type: String,
+        default: ''
     }
 }, {
     timestamps: true

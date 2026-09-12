@@ -1,5 +1,6 @@
 import Scan from '../models/Scan.model.js';
 import { appendScanToSheet } from './googleSheets.service.js';
+import { createPerfexLead } from './perfexCrm.service.js';
 
 const normalize = (payload = {}) => ({
     sourceType: payload.sourceType || 'other',
@@ -12,7 +13,12 @@ const normalize = (payload = {}) => ({
     address: payload.address || '',
     socialLinks: Array.isArray(payload.socialLinks) ? payload.socialLinks.filter(Boolean) : [],
     sourceUrl: payload.sourceUrl || '',
-    rawText: payload.rawText || ''
+    rawText: payload.rawText || '',
+    // Identity of the logged-in user who performed the scan (set by the
+    // controller from req.user — see auth.middleware.js's `protect`).
+    userId: payload.userId || undefined,
+    userName: payload.userName || '',
+    userEmail: payload.userEmail || ''
 });
 
 /**
@@ -27,15 +33,20 @@ export const createScan = async (payload) => {
 };
 
 /**
- * Append an already-saved scan to Google Sheets and mark it as synced.
- * Throws if the scan doesn't exist or the Sheets append fails — the caller
- * (controller) is expected to report that back to the user, since this is
- * now a deliberate, user-initiated action rather than a silent best-effort one.
+ * Append an already-saved scan to Google Sheets AND create a matching Lead
+ * in Perfex CRM — both happen on the same "Save" tap. Throws if the scan
+ * doesn't exist (or doesn't belong to `userId`, when provided) or the
+ * Sheets append fails, since Sheets is the primary, user-facing part of
+ * "Save" — the caller (controller) is expected to report that back to the
+ * user. The Perfex CRM push is kept resilient instead (like the original
+ * Sheets-only flow used to be): a CRM outage is recorded on the scan and
+ * logged, but never undoes the Sheets save or fails the request.
  * @param {string} scanId
+ * @param {string} [userId] - When provided, only that user's own scan can be synced.
  * @returns {Promise<Object>} The updated Scan document.
  */
-export const syncScanToSheet = async (scanId) => {
-    const scan = await Scan.findOne({ scanId });
+export const syncScanToSheet = async (scanId, userId) => {
+    const scan = await Scan.findOne(userId ? { scanId, userId } : { scanId });
     if (!scan) {
         const error = new Error('Scan not found');
         error.status = 404;
@@ -43,15 +54,25 @@ export const syncScanToSheet = async (scanId) => {
     }
 
     // Idempotent: a double-tap or a retried request after a dropped response
-    // should never produce a second row for the same scan.
-    if (scan.syncedToSheet) {
-        return scan;
+    // should never produce a second row/lead for the same scan.
+    if (!scan.syncedToSheet) {
+        await appendScanToSheet(scan);
+        scan.syncedToSheet = true;
+        scan.syncedAt = new Date();
     }
 
-    await appendScanToSheet(scan);
+    if (!scan.syncedToCrm) {
+        try {
+            const leadId = await createPerfexLead(scan);
+            scan.syncedToCrm = true;
+            scan.crmLeadId = String(leadId);
+            scan.crmSyncError = '';
+        } catch (error) {
+            scan.crmSyncError = error.message;
+            console.error('⚠️  Perfex CRM lead creation failed (scan/sheet still saved):', error.message);
+        }
+    }
 
-    scan.syncedToSheet = true;
-    scan.syncedAt = new Date();
     await scan.save();
 
     return scan;

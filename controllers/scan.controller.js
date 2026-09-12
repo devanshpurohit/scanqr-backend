@@ -4,10 +4,22 @@ import { parseQrData } from '../utils/qr.service.js';
 import { analyzeImageWithOpenAI } from '../utils/openai.service.js';
 import { createScan, syncScanToSheet } from '../utils/scan.service.js';
 
+// Attaches the AUTHENTICATED user's identity (from req.user, set by the
+// `protect` middleware after verifying the JWT) onto a scan payload. This is
+// the only place user identity gets attached — it is never read from the
+// request body, so the frontend cannot send an arbitrary name/ID and
+// impersonate someone else.
+const withAuthenticatedUser = (payload, req) => ({
+    ...payload,
+    userId: req.user._id,
+    userName: req.user.name,
+    userEmail: req.user.email
+});
+
 // @desc    Process already-decoded QR data (frontend decodes the QR, backend
 //          extracts useful information from the resulting string) and save it
 // @route   POST /api/scan/qr
-// @access  Public
+// @access  Private
 export const scanQr = async (req, res, next) => {
     try {
         const { data } = req.body;
@@ -20,7 +32,7 @@ export const scanQr = async (req, res, next) => {
         }
 
         const parsed = parseQrData(data);
-        const scan = await createScan(parsed);
+        const scan = await createScan(withAuthenticatedUser(parsed, req));
 
         res.status(201).json({
             success: true,
@@ -34,7 +46,7 @@ export const scanQr = async (req, res, next) => {
 // @desc    Process an uploaded image (business card, contact card, screenshot,
 //          social media post, company card, etc.) with OpenAI Vision and save it
 // @route   POST /api/scan/image
-// @access  Public
+// @access  Private
 export const scanImage = async (req, res, next) => {
     const file = req.file;
 
@@ -47,7 +59,7 @@ export const scanImage = async (req, res, next) => {
         }
 
         const extracted = await analyzeImageWithOpenAI(file.path);
-        const scan = await createScan(extracted);
+        const scan = await createScan(withAuthenticatedUser(extracted, req));
 
         res.status(201).json({
             success: true,
@@ -66,14 +78,14 @@ export const scanImage = async (req, res, next) => {
     }
 };
 
-// @desc    Get recent scans (history), newest first
+// @desc    Get recent scans (history) for the LOGGED-IN user, newest first
 // @route   GET /api/scan
-// @access  Public
+// @access  Private
 export const getScans = async (req, res, next) => {
     try {
         const { page = 1, limit = 20, sourceType, search } = req.query;
 
-        const query = {};
+        const query = { userId: req.user._id };
         if (sourceType) query.sourceType = sourceType;
         if (search) {
             query.$or = [
@@ -103,16 +115,18 @@ export const getScans = async (req, res, next) => {
     }
 };
 
-// @desc    Push an already-saved scan into Google Sheets (user tapped "Save")
+// @desc    Push an already-saved scan into Google Sheets + Perfex CRM (user tapped "Save")
 // @route   POST /api/scan/:scanId/save
-// @access  Public
+// @access  Private
 export const saveScanToSheet = async (req, res, next) => {
     try {
-        const scan = await syncScanToSheet(req.params.scanId);
+        const scan = await syncScanToSheet(req.params.scanId, req.user._id);
 
         res.json({
             success: true,
-            message: 'Saved to Google Sheets',
+            message: scan.syncedToCrm
+                ? 'Saved to Google Sheets and Perfex CRM'
+                : 'Saved to Google Sheets (Perfex CRM sync failed — see scan.crmSyncError)',
             scan
         });
     } catch (error) {
@@ -125,12 +139,12 @@ export const saveScanToSheet = async (req, res, next) => {
     }
 };
 
-// @desc    Get a single scan by its scanId
+// @desc    Get a single scan by its scanId (only if it belongs to the caller)
 // @route   GET /api/scan/:scanId
-// @access  Public
+// @access  Private
 export const getScan = async (req, res, next) => {
     try {
-        const scan = await Scan.findOne({ scanId: req.params.scanId });
+        const scan = await Scan.findOne({ scanId: req.params.scanId, userId: req.user._id });
 
         if (!scan) {
             return res.status(404).json({
